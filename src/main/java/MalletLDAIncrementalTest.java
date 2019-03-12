@@ -4,20 +4,19 @@ import cc.mallet.pipe.SerialPipes;
 import cc.mallet.pipe.TokenSequence2FeatureSequence;
 import cc.mallet.pipe.iterator.CsvIterator;
 import cc.mallet.topics.ParallelTopicModel;
-import cc.mallet.types.Alphabet;
-import cc.mallet.types.IDSorter;
 import cc.mallet.types.Instance;
 import cc.mallet.types.InstanceList;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.PrintStream;
+import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Formatter;
 import java.util.Iterator;
-import java.util.Locale;
-import java.util.TreeSet;
+import java.util.Properties;
 import java.util.regex.Pattern;
 
 /**
@@ -25,77 +24,115 @@ import java.util.regex.Pattern;
  */
 public class MalletLDAIncrementalTest {
 
-	private static String TOPIC_MODEL_FILE_PATH = "data/my-previous-model.dat";
-	private static String CORPUS_1_FILE_PATH = "data/kt1.txt";
-	private static String CORPUS_2_FILE_PATH = "data/kt2.txt";
-
-	private static int NUMBER_OF_TERMS_BY_TOPIC = 10;
-	private static int NUMBER_OF_TOPICS = 10;
-	private static int NUMBER_OF_ITERATIONS = 2000;
-	private static int NUMBER_OF_THREADS = 2;
-
-	private static double LDA_ALPHA_SUM = 1.0;
-	private static double LDA_BETA = 0.01;
 
 	public static void main(String[] args) throws Exception {
-
-		if (true) {
-			PrintStream fileStream = new PrintStream("data/output-kt-total.txt");
-			System.setOut(fileStream);
-		}
-
-		File topicModuleFile = new File(TOPIC_MODEL_FILE_PATH);
-
-		ParallelTopicModel model = null;
+		String topicModelFilePath = props.getProperty("topic-model-file");
+		File topicModuleFile = new File(topicModelFilePath);
 		String fileName = null;
+		ParallelTopicModel model = null;
 
 		if (topicModuleFile.exists()) {
+
 			model = ParallelTopicModel.read(topicModuleFile);
-			fileName = CORPUS_2_FILE_PATH;
+			fileName = props.getProperty("corpus2-file-path");
+
 		} else {
-			fileName = CORPUS_1_FILE_PATH;
-			model = new ParallelTopicModel(NUMBER_OF_TOPICS, LDA_ALPHA_SUM, LDA_BETA);
-			model.setNumThreads(NUMBER_OF_THREADS);
-			model.setNumIterations(NUMBER_OF_ITERATIONS);
+
+			fileName = props.getProperty("corpus1-file-path");
+
+			int numberOfTopics = Integer.parseInt(props.getProperty("number-of-topics"));
+			int numberOfThreads = Integer.parseInt(props.getProperty("number-of-threads"));
+			int numberOfIterations = Integer.parseInt(props.getProperty("number-of-iterations"));
+
+			model = new ParallelTopicModel(numberOfTopics, 1.0, 0.01);
+			model.setNumThreads(numberOfThreads);
+			model.setNumIterations(numberOfIterations);
 		}
 
 		ArrayList<Pipe> pipeList = new ArrayList<>();
 
-		pipeList.add( new CharSequence2TokenSequence(Pattern.compile("\\p{L}[\\p{L}\\p{P}]+\\p{L}")) );
-		pipeList.add( new TokenSequence2FeatureSequence() );
+		pipeList.add(new CharSequence2TokenSequence(Pattern.compile("\\p{L}[\\p{L}\\p{P}]+\\p{L}")));
+		pipeList.add(new TokenSequence2FeatureSequence());
 
-		InputStreamReader fileReader = new InputStreamReader(new FileInputStream(fileName), StandardCharsets.UTF_8);
+		InputStreamReader fileReader =
+			new InputStreamReader(new FileInputStream(fileName), StandardCharsets.UTF_8);
 
 		Iterator<Instance> instanceIterator = new CsvIterator(fileReader,
 			Pattern.compile("^(\\S*)[\\s,]*(\\S*)[\\s,]*(.*)$"), 3, 2, 1);
 
 		InstanceList training = new InstanceList(new SerialPipes(pipeList));
-		training.addThruPipe(instanceIterator); // data, label, name fields
+		training.addThruPipe(instanceIterator); // data, label, terms
 
 		model.addInstances(training);
 		model.estimate();
+		model.write(topicModuleFile);
 
-		Alphabet dataAlphabet = training.getDataAlphabet();
-		double[] topicDistribution = model.getTopicProbabilities(0);
-		// Get an array of sorted sets of word ID/count pairs
-		ArrayList<TreeSet<IDSorter>> topicSortedWords = model.getSortedWords();
+		printAllReports(model);
+	}
 
-		// Show top 5 words in topics with proportions for the first document
-		for (int topic = 0; topic < NUMBER_OF_TOPICS; topic++) {
-			Iterator<IDSorter> iterator = topicSortedWords.get(topic).iterator();
+	private static void printAllReports(ParallelTopicModel topicModel) throws IOException {
+		int numberOfTermsByTopic = Integer.parseInt(props.getProperty("number-of-terms-by-topic"));
 
-			Formatter out = new Formatter(new StringBuilder(), Locale.US);
-			out.format("%d\t%.3f\t", topic, topicDistribution[topic]);
-			int rank = 0;
-			while (iterator.hasNext() && rank < NUMBER_OF_TERMS_BY_TOPIC) {
-				IDSorter idCountPair = iterator.next();
-				out.format("%s (%.0f) ", dataAlphabet.lookupObject(idCountPair.getID()), idCountPair.getWeight());
-				rank++;
-			}
+		String topicsFilePath = props.getProperty("output-topics-file");
+		String topicsXMLReportFilePath = props.getProperty("output-topic-xml-report-file");
+		String topicPhraseXMLReportFilePath = props.getProperty("output-topic-phrase-xml-report-file");
+		String documentTopicsFilePath = props.getProperty("output-document-topics-file");
+		String topicWordWeightFilePath = props.getProperty("output-topic-word-weight-file");
+		String topicTypeTopicCountsFilePath = props.getProperty("output-topic-type-topic-counts-file");
 
-			System.out.println(out);
+		if (topicsFilePath != null) {
+			topicModel.printTopWords(new File(topicsFilePath), numberOfTermsByTopic, false);
 		}
 
-		model.write(new File(TOPIC_MODEL_FILE_PATH));
+		File malletDir = new File("data/mallet");
+		malletDir.mkdirs();
+
+		if (topicsXMLReportFilePath != null) {
+			PrintWriter out = new PrintWriter(topicsXMLReportFilePath);
+			topicModel.topicXMLReport(out, numberOfTermsByTopic);
+			out.close();
+		}
+
+		if (topicPhraseXMLReportFilePath != null) {
+			PrintWriter out = new PrintWriter(topicPhraseXMLReportFilePath);
+			topicModel.topicPhraseXMLReport(out, numberOfTermsByTopic);
+			out.close();
+		}
+
+		if (documentTopicsFilePath != null) {
+			PrintWriter out3 = new PrintWriter(new FileWriter(documentTopicsFilePath));
+			topicModel.printDocumentTopics(out3, 0.0, -1);
+			out3.close();
+		}
+
+		if (topicWordWeightFilePath != null) {
+			topicModel.printTopicWordWeights(new File(topicWordWeightFilePath));
+		}
+
+		if (topicTypeTopicCountsFilePath != null) {
+			topicModel.printTypeTopicCounts(new File(topicTypeTopicCountsFilePath));
+		}
 	}
+
+	private static Properties loadProperties() {
+		Properties props = new Properties();
+		InputStream input = null;
+		ClassLoader loader = Thread.currentThread().getContextClassLoader();
+
+		try {
+			String filename = "mallet.properties";
+			input = loader.getResourceAsStream(filename);
+			props.load(input);
+		} catch (Exception ignored) {
+		} finally {
+			try {
+				if (input != null) input.close();
+			} catch (Exception ignored) {
+			}
+		}
+
+		return props;
+	}
+
+	private static Properties props = loadProperties();
 }
